@@ -1,66 +1,61 @@
-import cv2
 import numpy as np
 
-_LANDMARK_IDS = [1, 152, 33, 263, 61, 291]
+# Large landmark sets for robust centroids — averaging many points
+# reduces per-landmark jitter by sqrt(N).
+_LEFT_EYE_IDX = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+_RIGHT_EYE_IDX = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466]
+_NOSE_IDX = [6, 197, 195, 168]  # upper nose bridge only — jaw doesn't affect these
+# Forehead / brow ridge — stable skull landmarks
+_FOREHEAD_IDX = [10, 67, 69, 104, 108, 109, 151, 297, 299, 333, 337, 338]
 
-_MODEL_POINTS = np.array([
-    (0.0,   0.0,    0.0),
-    (0.0,  -63.6,  -12.5),
-    (-43.3, 32.7,  -26.0),
-    (43.3,  32.7,  -26.0),
-    (-28.9, -28.9, -24.1),
-    (28.9,  -28.9, -24.1),
-], dtype=np.float64)
+_SCALE = 90.0
 
 
 class PoseEstimator:
-    def __init__(self):
-        self._prev_rvec = None
-        self._prev_tvec = None
+    """
+    Geometric head-pose from large-centroid landmarks.
+    Uses only skull-attached points so mouth/jaw gestures don't move the cursor.
+    Landmarks are temporally smoothed before pose calculation.
+    """
+
+    def __init__(self, landmark_alpha=0.10):
+        self._landmark_alpha = landmark_alpha
+        self._smooth_landmarks = None
 
     def estimate(self, landmarks, frame_shape):
-        h, w = frame_shape[:2]
-        focal = w
-        camera_matrix = np.array([
-            [focal, 0,     w / 2],
-            [0,     focal, h / 2],
-            [0,     0,     1    ],
-        ], dtype=np.float64)
-
-        image_points = np.array([
-            (landmarks[i][0] * w, landmarks[i][1] * h)
-            for i in _LANDMARK_IDS
-        ], dtype=np.float64)
-
-        if self._prev_rvec is not None:
-            ok, rvec, tvec = cv2.solvePnP(
-                _MODEL_POINTS, image_points, camera_matrix, np.zeros((4, 1)),
-                rvec=self._prev_rvec, tvec=self._prev_tvec,
-                useExtrinsicGuess=True,
-                flags=cv2.SOLVEPNP_ITERATIVE,
-            )
+        if self._smooth_landmarks is None:
+            self._smooth_landmarks = landmarks.copy()
         else:
-            ok, rvec, tvec = cv2.solvePnP(
-                _MODEL_POINTS, image_points, camera_matrix, np.zeros((4, 1)),
-                flags=cv2.SOLVEPNP_EPNP,
-            )
+            a = self._landmark_alpha
+            self._smooth_landmarks = a * landmarks + (1 - a) * self._smooth_landmarks
 
-        if not ok:
+        lm = self._smooth_landmarks
+
+        nose = lm[_NOSE_IDX, :2].mean(axis=0)
+        left_eye = lm[_LEFT_EYE_IDX, :2].mean(axis=0)
+        right_eye = lm[_RIGHT_EYE_IDX, :2].mean(axis=0)
+        forehead = lm[_FOREHEAD_IDX, :2].mean(axis=0)
+
+        eye_mid = (left_eye + right_eye) / 2.0
+        eye_vec = right_eye - left_eye
+        eye_dist = float(np.linalg.norm(eye_vec))
+
+        if eye_dist < 1e-6:
             return 0.0, 0.0, 0.0
 
-        self._prev_rvec = rvec.copy()
-        self._prev_tvec = tvec.copy()
+        # Yaw: horizontal offset of nose from eye midpoint
+        dx = (nose[0] - eye_mid[0]) / eye_dist
+        yaw = float(dx * _SCALE)
 
-        rmat, _ = cv2.Rodrigues(rvec)
-        face_fwd = rmat @ np.array([0.0, 0.0, 1.0])
-        face_up  = rmat @ np.array([0.0, 1.0, 0.0])
+        # Pitch: use forehead-to-nose vertical distance relative to eye width
+        # More stable than nose-to-eye-mid because forehead doesn't move with expressions
+        dy = (nose[1] - forehead[1]) / eye_dist
+        # Normalize so that neutral dy maps to ~0 after baseline subtraction
+        pitch = float(-dy * _SCALE)
 
-        yaw   = float(np.degrees(np.arctan2( face_fwd[0], -face_fwd[2])))
-        pitch = float(np.degrees(np.arctan2(-face_fwd[1], -face_fwd[2])))
-        roll  = float(np.degrees(np.arctan2( face_up[0],  -face_up[1])))
+        roll = float(np.degrees(np.arctan2(-eye_vec[1], eye_vec[0])))
 
         return pitch, yaw, roll
 
     def reset(self):
-        self._prev_rvec = None
-        self._prev_tvec = None
+        self._smooth_landmarks = None
