@@ -3,6 +3,7 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from pynput.keyboard import Controller as KeyboardController, Key
+from actions import drag_start, drag_end
 
 SAMPLE_RATE = 16000
 SILENCE_THRESHOLD = 0.012
@@ -135,6 +136,8 @@ class VoiceTyper:
         "copy": ("cmd", "c"),
         "paste": ("cmd", "v"),
         "cut": ("cmd", "x"),
+        "drag": drag_start,
+        "drop": drag_end,
     }
 
     def _try_command(self, text):
@@ -148,7 +151,9 @@ class VoiceTyper:
         action = self.COMMANDS.get(cmd_name)
         if action is None:
             return False
-        if isinstance(action, tuple):
+        if callable(action):
+            action()
+        elif isinstance(action, tuple):
             keys = [{"cmd": Key.cmd, "shift": Key.shift}.get(k, k) for k in action[:-1]]
             for k in keys:
                 self._keyboard.press(k)

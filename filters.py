@@ -4,12 +4,7 @@ from filterpy.kalman import KalmanFilter
 
 
 class OneEuroFilter:
-    """
-    Adaptive low-pass filter for pointer control.
-    At rest: aggressively damps jitter (low cutoff).
-    During fast movement: nearly transparent (cutoff rises with speed).
-    Geurts et al. 2012 — "One Euro Filter".
-    """
+   
     def __init__(self, min_cutoff=0.8, beta=0.004, d_cutoff=1.0, freq=30.0):
         self.min_cutoff = min_cutoff
         self.beta       = beta
@@ -107,3 +102,55 @@ class KalmanCursor:
 
     def reset(self):
         self._initialized = False
+
+
+class CursorSettler:
+    """Adaptive dead-zone that grows as the cursor holds still.
+
+    When the user stops moving, the gate radius ramps up over time, making the
+    cursor progressively stickier and easier to pinpoint.  A deliberate movement
+    (exceeding the current gate) instantly resets the gate to its minimum so the
+    cursor feels responsive again.
+    """
+    def __init__(self, gate_min=3.0, gate_max=40.0, ramp_frames=20, centroid_window=10):
+        self.gate_min = gate_min
+        self.gate_max = gate_max
+        self.ramp_frames = ramp_frames
+        self.centroid_window = centroid_window
+        self._still_frames = 0
+        self._anchor_x = None
+        self._anchor_y = None
+        self._history = []
+
+    def update(self, x, y):
+        gate = self.gate_min + (self.gate_max - self.gate_min) * min(self._still_frames / self.ramp_frames, 1.0)
+
+        if self._anchor_x is None:
+            self._anchor_x, self._anchor_y = x, y
+            self._history = [(x, y)]
+            return x, y
+
+        dx = x - self._anchor_x
+        dy = y - self._anchor_y
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        if dist < gate:
+            self._still_frames = min(self._still_frames + 1, self.ramp_frames)
+            self._history.append((x, y))
+            if len(self._history) > self.centroid_window:
+                self._history = self._history[-self.centroid_window:]
+            cx = sum(p[0] for p in self._history) / len(self._history)
+            cy = sum(p[1] for p in self._history) / len(self._history)
+            self._anchor_x, self._anchor_y = cx, cy
+            return int(cx), int(cy)
+        else:
+            self._still_frames = 0
+            self._anchor_x, self._anchor_y = x, y
+            self._history = [(x, y)]
+            return x, y
+
+    def reset(self):
+        self._still_frames = 0
+        self._anchor_x = None
+        self._anchor_y = None
+        self._history = []

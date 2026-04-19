@@ -9,7 +9,7 @@ import numpy as np
 from pynput.mouse import Controller as MouseController
 
 from capture import FrameCapture
-from filters import OneEuroFilter, KalmanCursor
+from filters import OneEuroFilter, KalmanCursor, CursorSettler
 from pose import PoseEstimator
 from gestures.ear import BlinkDetector, MouthOpenTracker
 from actions import left_click, right_click, scroll
@@ -85,6 +85,8 @@ def run_raw(capture, estimator, debug=False):
     euro_pitch = OneEuroFilter(min_cutoff=0.15, beta=0.05)
     kalman     = KalmanCursor(process_noise=0.01, measurement_noise=35.0, velocity_decay=0.3)
 
+    settler = CursorSettler(gate_min=3.0, gate_max=40.0, ramp_frames=20)
+
     blink_detector = BlinkDetector()
     mouth_tracker = MouthOpenTracker()
     scroll_mode = False
@@ -97,7 +99,6 @@ def run_raw(capture, estimator, debug=False):
 
     last_face_time = time.time()
     prev_x, prev_y = SCREEN_W // 2, SCREEN_H // 2
-    VELOCITY_GATE = 8
     print("Head mouse running — look around to move cursor. Ctrl-C to quit.")
     print("  Blink = left click | Hold mouth open = scroll | Voice typing active")
 
@@ -110,6 +111,7 @@ def run_raw(capture, estimator, debug=False):
                     euro_yaw.reset()
                     euro_pitch.reset()
                     kalman.reset()
+                    settler.reset()
                     estimator.reset()
                 if debug and frame is not None:
                     cv2.imshow("debug", frame)
@@ -155,11 +157,10 @@ def run_raw(capture, estimator, debug=False):
                     scroll_accumulator -= scroll_amount
             else:
                 scroll_accumulator = 0.0
-                dx = x - prev_x
-                dy = y - prev_y
-                if dx * dx + dy * dy >= VELOCITY_GATE * VELOCITY_GATE:
-                    mouse.position = (x, y)
-                    prev_x, prev_y = x, y
+                sx, sy = settler.update(x, y)
+                if sx != prev_x or sy != prev_y:
+                    mouse.position = (sx, sy)
+                    prev_x, prev_y = sx, sy
 
             blink = blink_detector.update(landmarks)
             if blink and not scroll_mode:
