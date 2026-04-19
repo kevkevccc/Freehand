@@ -8,17 +8,15 @@ _NOSE_IDX = [6, 197, 195, 168]  # upper nose bridge only — jaw doesn't affect 
 # Forehead / brow ridge — stable skull landmarks
 _FOREHEAD_IDX = [10, 67, 69, 104, 108, 109, 151, 297, 299, 333, 337, 338]
 
-_SCALE = 90.0
-
 
 class PoseEstimator:
     """
-    Geometric head-pose from large-centroid landmarks.
+    3D geometric head-pose from MediaPipe landmarks.
+    Uses full 3D coordinates to decouple pitch/yaw axes.
     Uses only skull-attached points so mouth/jaw gestures don't move the cursor.
-    Landmarks are temporally smoothed before pose calculation.
     """
 
-    def __init__(self, landmark_alpha=0.10):
+    def __init__(self, landmark_alpha=0.45):
         self._landmark_alpha = landmark_alpha
         self._smooth_landmarks = None
 
@@ -31,29 +29,32 @@ class PoseEstimator:
 
         lm = self._smooth_landmarks
 
-        nose = lm[_NOSE_IDX, :2].mean(axis=0)
-        left_eye = lm[_LEFT_EYE_IDX, :2].mean(axis=0)
-        right_eye = lm[_RIGHT_EYE_IDX, :2].mean(axis=0)
-        forehead = lm[_FOREHEAD_IDX, :2].mean(axis=0)
+        # Use all 3 coordinates (x, y, z)
+        nose = lm[_NOSE_IDX, :3].mean(axis=0)
+        left_eye = lm[_LEFT_EYE_IDX, :3].mean(axis=0)
+        right_eye = lm[_RIGHT_EYE_IDX, :3].mean(axis=0)
+        forehead = lm[_FOREHEAD_IDX, :3].mean(axis=0)
 
         eye_mid = (left_eye + right_eye) / 2.0
-        eye_vec = right_eye - left_eye
-        eye_dist = float(np.linalg.norm(eye_vec))
+        eye_vec_3d = right_eye - left_eye
+        eye_dist = float(np.linalg.norm(eye_vec_3d[:2]))  # 2D distance for normalization
 
         if eye_dist < 1e-6:
             return 0.0, 0.0, 0.0
 
-        # Yaw: horizontal offset of nose from eye midpoint
-        dx = (nose[0] - eye_mid[0]) / eye_dist
-        yaw = float(dx * _SCALE)
+        # Yaw: angle of nose offset from eye midpoint in the XZ plane
+        # Using atan2 gives true angle independent of pitch
+        dx = nose[0] - eye_mid[0]
+        dz = nose[2] - eye_mid[2]
+        yaw = float(np.degrees(np.arctan2(dx, -dz + 1e-6)))
 
-        # Pitch: use forehead-to-nose vertical distance relative to eye width
-        # More stable than nose-to-eye-mid because forehead doesn't move with expressions
-        dy = (nose[1] - forehead[1]) / eye_dist
-        # Normalize so that neutral dy maps to ~0 after baseline subtraction
-        pitch = float(-dy * _SCALE)
+        # Pitch: angle of forehead-to-nose vector in the YZ plane
+        # This decouples pitch from yaw by using depth
+        fwd_vec = nose - forehead
+        pitch = float(np.degrees(np.arctan2(-fwd_vec[1], -fwd_vec[2] + 1e-6)))
 
-        roll = float(np.degrees(np.arctan2(-eye_vec[1], eye_vec[0])))
+        # Roll: rotation around the forward axis (from eye vector)
+        roll = float(np.degrees(np.arctan2(-eye_vec_3d[1], eye_vec_3d[0])))
 
         return pitch, yaw, roll
 

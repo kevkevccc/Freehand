@@ -21,7 +21,7 @@ def get_screen_dimensions():
     frame = NSScreen.mainScreen().frame()
     return int(frame.size.width), int(frame.size.height)
 
-SENSITIVITY = 1.0
+SENSITIVITY = 1.3
 YAW_RANGE  = 7.0 / SENSITIVITY
 PITCH_UP   = 4.5 / SENSITIVITY
 PITCH_DOWN = 6.0 / SENSITIVITY
@@ -87,8 +87,8 @@ def run_raw(capture, estimator, debug=False, screen_w=None, screen_h=None):
     # Pipeline: raw angle → One Euro (jitter removal) → pixel map → Kalman (prediction/smoothing)
     # One Euro: min_cutoff=1.5 gives good jitter reduction at rest,
     # beta=0.007 keeps it responsive without overshooting
-    euro_yaw   = OneEuroFilter(min_cutoff=0.15, beta=0.05)
-    euro_pitch = OneEuroFilter(min_cutoff=0.15, beta=0.05)
+    euro_yaw   = OneEuroFilter(min_cutoff=0.05, beta=0.1)
+    euro_pitch = OneEuroFilter(min_cutoff=0.05, beta=0.1)
     kalman     = KalmanCursor(process_noise=0.01, measurement_noise=35.0, velocity_decay=0.3)
 
     settler = CursorSettler(gate_min=3.0, gate_max=40.0, ramp_frames=20)
@@ -108,7 +108,7 @@ def run_raw(capture, estimator, debug=False, screen_w=None, screen_h=None):
     head_tracking_enabled = True
     print("Head mouse running — look around to move cursor. Ctrl-C to quit.")
     print("  Blink = left click | Hold mouth open = scroll | Voice typing active")
-    print("  Press 'v' to toggle voice-only mode (disables head tracking)")
+    print("  Press '1' to recalibrate | '2' to toggle voice-only mode")
 
     try:
         while True:
@@ -195,7 +195,7 @@ def run_raw(capture, estimator, debug=False, screen_w=None, screen_h=None):
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
-                elif key == ord('r'):
+                elif key == ord('1'):
                     print("\nRecalibrating...")
                     euro_yaw.reset()
                     euro_pitch.reset()
@@ -204,7 +204,7 @@ def run_raw(capture, estimator, debug=False, screen_w=None, screen_h=None):
                     estimator.reset()
                     neutral_pitch, neutral_yaw = capture_neutral(capture, estimator)
                     print("Head mouse running — look around to move cursor. Ctrl-C to quit.")
-                elif key == ord('v'):
+                elif key == ord('2'):
                     head_tracking_enabled = not head_tracking_enabled
                     mode = "HEAD TRACKING" if head_tracking_enabled else "VOICE ONLY (mouse free)"
                     print(f"\n[mode] {mode}")
