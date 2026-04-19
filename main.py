@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from pynput.mouse import Controller as MouseController
 
+from AppKit import NSScreen
+
 from capture import FrameCapture
 from filters import OneEuroFilter, KalmanCursor, CursorSettler
 from pose import PoseEstimator
@@ -15,8 +17,9 @@ from gestures.ear import BlinkDetector, MouthOpenTracker
 from actions import left_click, right_click, scroll
 from voice import VoiceTyper
 
-SCREEN_W = 1792
-SCREEN_H = 1120
+def get_screen_dimensions():
+    frame = NSScreen.mainScreen().frame()
+    return int(frame.size.width), int(frame.size.height)
 
 YAW_RANGE  = 7.0
 PITCH_UP   =  4.5
@@ -54,7 +57,7 @@ def _power_map(v, exponent):
     return (1 if v >= 0 else -1) * abs(v) ** exponent
 
 
-def yaw_pitch_to_cursor(yaw, pitch):
+def yaw_pitch_to_cursor(yaw, pitch, screen_w, screen_h):
     yaw   = _apply_dead_zone(yaw,   DEAD_ZONE)
     pitch = _apply_dead_zone(pitch, DEAD_ZONE)
 
@@ -68,12 +71,14 @@ def yaw_pitch_to_cursor(yaw, pitch):
         ny = max(-1.0, min(1.0, pitch / PITCH_DOWN))
     ny = _power_map(ny, EDGE_EXPONENT)
 
-    x = SCREEN_W / 2 + nx * (SCREEN_W / 2)
-    y = SCREEN_H / 2 - ny * (SCREEN_H / 2)
-    return int(max(0, min(SCREEN_W - 1, x))), int(max(0, min(SCREEN_H - 1, y)))
+    x = screen_w / 2 + nx * (screen_w / 2)
+    y = screen_h / 2 - ny * (screen_h / 2)
+    return int(max(0, min(screen_w - 1, x))), int(max(0, min(screen_h - 1, y)))
 
 
-def run_raw(capture, estimator, debug=False):
+def run_raw(capture, estimator, debug=False, screen_w=None, screen_h=None):
+    if screen_w is None or screen_h is None:
+        screen_w, screen_h = get_screen_dimensions()
     neutral_pitch, neutral_yaw = capture_neutral(capture, estimator)
 
     mouse = MouseController()
@@ -98,9 +103,11 @@ def run_raw(capture, estimator, debug=False):
     voice.start()
 
     last_face_time = time.time()
-    prev_x, prev_y = SCREEN_W // 2, SCREEN_H // 2
+    prev_x, prev_y = screen_w // 2, screen_h // 2
+    head_tracking_enabled = True
     print("Head mouse running — look around to move cursor. Ctrl-C to quit.")
     print("  Blink = left click | Hold mouth open = scroll | Voice typing active")
+    print("  Press 'v' to toggle voice-only mode (disables head tracking)")
 
     try:
         while True:
@@ -120,66 +127,86 @@ def run_raw(capture, estimator, debug=False):
                 continue
 
             last_face_time = time.time()
-            pitch, yaw, _ = estimator.estimate(landmarks, frame.shape)
 
-            rel_yaw   = yaw   - neutral_yaw
-            rel_pitch = pitch - neutral_pitch
+            if head_tracking_enabled:
+                pitch, yaw, _ = estimator.estimate(landmarks, frame.shape)
 
-            # Distance-adaptive filtering: more smoothing at screen edges
-            # where landmark noise is amplified by perspective
-            dist = (rel_yaw / YAW_RANGE) ** 2 + (rel_pitch / max(PITCH_UP, PITCH_DOWN)) ** 2
-            dist = min(dist, 1.0)  # 0 at center, 1 at edge
-            adaptive_cutoff = 0.15 * (1.0 - 0.5 * dist)
-            euro_yaw.min_cutoff = adaptive_cutoff
-            euro_pitch.min_cutoff = adaptive_cutoff
+                rel_yaw   = yaw   - neutral_yaw
+                rel_pitch = pitch - neutral_pitch
 
-            smooth_yaw   = euro_yaw.update(rel_yaw)
-            smooth_pitch = euro_pitch.update(rel_pitch)
+                # Distance-adaptive filtering: more smoothing at screen edges
+                # where landmark noise is amplified by perspective
+                dist = (rel_yaw / YAW_RANGE) ** 2 + (rel_pitch / max(PITCH_UP, PITCH_DOWN)) ** 2
+                dist = min(dist, 1.0)  # 0 at center, 1 at edge
+                adaptive_cutoff = 0.15 * (1.0 - 0.5 * dist)
+                euro_yaw.min_cutoff = adaptive_cutoff
+                euro_pitch.min_cutoff = adaptive_cutoff
 
-            raw_x, raw_y = yaw_pitch_to_cursor(smooth_yaw, smooth_pitch)
-            kx, ky = kalman.update(raw_x, raw_y)
-            x, y = int(kx), int(ky)
-            x = max(0, min(SCREEN_W - 1, x))
-            y = max(0, min(SCREEN_H - 1, y))
+                smooth_yaw   = euro_yaw.update(rel_yaw)
+                smooth_pitch = euro_pitch.update(rel_pitch)
 
-            was_scrolling = scroll_mode
-            if voice.is_speaking:
-                scroll_mode = False
-            else:
-                scroll_mode = mouth_tracker.is_open(landmarks)
+                raw_x, raw_y = yaw_pitch_to_cursor(smooth_yaw, smooth_pitch, screen_w, screen_h)
+                kx, ky = kalman.update(raw_x, raw_y)
+                x, y = int(kx), int(ky)
+                x = max(0, min(screen_w - 1, x))
+                y = max(0, min(screen_h - 1, y))
 
-            if scroll_mode:
-                scroll_pitch = _apply_dead_zone(smooth_pitch, SCROLL_DEAD_ZONE)
-                scroll_accumulator += scroll_pitch * SCROLL_SPEED
-                scroll_amount = int(scroll_accumulator)
-                if scroll_amount != 0:
-                    scroll(scroll_amount)
-                    scroll_accumulator -= scroll_amount
-            else:
-                scroll_accumulator = 0.0
-                sx, sy = settler.update(x, y)
-                if sx != prev_x or sy != prev_y:
-                    mouse.position = (sx, sy)
-                    prev_x, prev_y = sx, sy
+                was_scrolling = scroll_mode
+                if voice.is_speaking:
+                    scroll_mode = False
+                else:
+                    scroll_mode = mouth_tracker.is_open(landmarks)
 
-            blink = blink_detector.update(landmarks)
-            if blink and not scroll_mode:
-                left_click()
+                if scroll_mode:
+                    scroll_pitch = _apply_dead_zone(smooth_pitch, SCROLL_DEAD_ZONE)
+                    scroll_accumulator += scroll_pitch * SCROLL_SPEED
+                    scroll_amount = int(scroll_accumulator)
+                    if scroll_amount != 0:
+                        scroll(scroll_amount)
+                        scroll_accumulator -= scroll_amount
+                else:
+                    scroll_accumulator = 0.0
+                    sx, sy = settler.update(x, y)
+                    if sx != prev_x or sy != prev_y:
+                        mouse.position = (sx, sy)
+                        prev_x, prev_y = sx, sy
+
+                blink = blink_detector.update(landmarks)
+                if blink and not scroll_mode:
+                    left_click()
 
             if debug:
-                cv2.putText(frame, f"yaw={smooth_yaw:+.1f}  pitch={smooth_pitch:+.1f}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                mode = "SCROLL" if scroll_mode else "CURSOR"
-                cv2.putText(frame, f"cursor=({x},{y})  [{mode}]",
-                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                if scroll_mode:
-                    cv2.putText(frame, f"scroll_pitch={smooth_pitch:+.2f}",
-                                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if head_tracking_enabled:
+                    cv2.putText(frame, f"yaw={smooth_yaw:+.1f}  pitch={smooth_pitch:+.1f}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    mode_str = "SCROLL" if scroll_mode else "CURSOR"
+                    cv2.putText(frame, f"cursor=({x},{y})  [{mode_str}]",
+                                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    if scroll_mode:
+                        cv2.putText(frame, f"scroll_pitch={smooth_pitch:+.2f}",
+                                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                else:
+                    cv2.putText(frame, "VOICE ONLY MODE (press 'v' to enable head tracking)",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
                 cv2.putText(frame, f"voice: {voice.status}",
                             (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
                 cv2.imshow("debug", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('r'):
+                    print("\nRecalibrating...")
+                    euro_yaw.reset()
+                    euro_pitch.reset()
+                    kalman.reset()
+                    settler.reset()
+                    estimator.reset()
+                    neutral_pitch, neutral_yaw = capture_neutral(capture, estimator)
+                    print("Head mouse running — look around to move cursor. Ctrl-C to quit.")
+                elif key == ord('v'):
+                    head_tracking_enabled = not head_tracking_enabled
+                    mode = "HEAD TRACKING" if head_tracking_enabled else "VOICE ONLY (mouse free)"
+                    print(f"\n[mode] {mode}")
 
     except KeyboardInterrupt:
         pass
@@ -208,6 +235,8 @@ def parse_args():
     p.add_argument("--run",        action="store_true", help="Start cursor control")
     p.add_argument("--debug-pose", action="store_true", help="Print pose angles only")
     p.add_argument("--debug",      action="store_true", help="Show camera preview while running")
+    p.add_argument("--width",      type=int, default=None, help="Screen width (auto-detected if not specified)")
+    p.add_argument("--height",     type=int, default=None, help="Screen height (auto-detected if not specified)")
     return p.parse_args()
 
 
@@ -221,7 +250,7 @@ def main():
         if args.debug_pose:
             run_pose_debug(capture, estimator)
         elif args.run:
-            run_raw(capture, estimator, debug=args.debug)
+            run_raw(capture, estimator, debug=args.debug, screen_w=args.width, screen_h=args.height)
         else:
             print("Use --run to start, --debug-pose to check angles, --debug to add preview.")
     finally:
