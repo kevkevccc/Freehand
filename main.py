@@ -21,9 +21,10 @@ def get_screen_dimensions():
     frame = NSScreen.mainScreen().frame()
     return int(frame.size.width), int(frame.size.height)
 
-YAW_RANGE  = 7.0
-PITCH_UP   =  4.5
-PITCH_DOWN =  6.0
+SENSITIVITY = 1.0
+YAW_RANGE  = 7.0 / SENSITIVITY
+PITCH_UP   = 4.5 / SENSITIVITY
+PITCH_DOWN = 6.0 / SENSITIVITY
 
 DEAD_ZONE          = 0.3
 EDGE_EXPONENT      = 1.0  # linear — no edge compression
@@ -235,6 +236,8 @@ def parse_args():
     p.add_argument("--run",        action="store_true", help="Start cursor control")
     p.add_argument("--debug-pose", action="store_true", help="Print pose angles only")
     p.add_argument("--debug",      action="store_true", help="Show camera preview while running")
+    p.add_argument("--sensitivity", type=float, default=None,
+                   help="Cursor sensitivity (default 1.0). Higher = less head movement needed.")
     p.add_argument("--width",      type=int, default=None, help="Screen width (auto-detected if not specified)")
     p.add_argument("--height",     type=int, default=None, help="Screen height (auto-detected if not specified)")
     return p.parse_args()
@@ -245,6 +248,13 @@ def main():
     capture = FrameCapture()
     capture.start()
     estimator = PoseEstimator()
+
+    if args.sensitivity is not None:
+        global SENSITIVITY, YAW_RANGE, PITCH_UP, PITCH_DOWN
+        SENSITIVITY = args.sensitivity
+        YAW_RANGE  = 7.0 / SENSITIVITY
+        PITCH_UP   = 4.5 / SENSITIVITY
+        PITCH_DOWN = 6.0 / SENSITIVITY
 
     try:
         if args.debug_pose:
